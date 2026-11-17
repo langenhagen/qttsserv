@@ -1,0 +1,17 @@
+[project]
+name = "qttsserv"
+version = "0.1.0"
+description = "Keep a Qwen3-TTS model loaded in a background server; a qtts CLI client streams its speech to the speakers over a Unix domain socket."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "mlx-audio[tts]>=0.6.5",
+    "numpy",
+    "sounddevice>=0.5.6",
+    # mlx-audio needs transformers 5.
+    "transformers>=5.14.0",
+]
+
+[tool.uv]
+# MLX runs on Apple Silicon only.
+environments = ["sys_platform == 'darwin'"]

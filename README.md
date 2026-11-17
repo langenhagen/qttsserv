@@ -1,0 +1,66 @@
+# Qttsserv
+
+A Qwen3-TTS server and CLI client for quick and responsive TTS on macOS.
+
+Keeps one [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) model loaded in a background process and streams its speech
+to the speakers while it is still generating.
+
+- `qtts_server.py` loads one model with
+  [mlx-audio](https://github.com/Blaizzy/mlx-audio) and serves requests, one at
+  a time. A request for another model drops the loaded model from memory first.
+- `qtts_client.py` reads the text from a file, the clipboard, or stdin, and
+  plays the audio as it arrives. Ctrl-C stops playback and generation.
+- `qtts.sh` runs the client through the project venv; link it into `PATH` as
+  `qtts`.
+- `qtts_protocol.py` holds the socket location and the message format.
+- `chunking.py` splits the text into chunks of at most 100 characters; copied
+  from my
+  [qwen3-tts-hello](https://github.com/langenhagen/experiments-and-tutorials/blob/master/Python/qwen3-tts-hello/chunking.py).
+
+If not already running, the first CLI invocation starts the server.
+
+## Setup
+
+```bash
+uv sync
+sudo ln -sf "$PWD/qtts.sh" /usr/local/bin/qtts  # link the CLI so you can use it everywhere
+```
+
+## Usage
+
+```bash
+qtts FILE --voice me.wav                         # speak a text file in the voice of me.wav
+qtts --clipboard --voice me.wav                  # speak the clipboard
+echo "hello" | qtts --voice me.wav               # speak piped text
+qtts FILE --voice me.wav --transcript me.txt     # clone closer with the words spoken in me.wav
+qtts FILE --voice me.wav --language german       # set the language instead of auto-detecting it
+qtts FILE --voice me.wav --temperature 0.7       # steadier delivery; default 1.3, higher is livelier
+qtts FILE --voice me.wav --seed 42               # same delivery on every run; default 0 is random
+qtts FILE --voice me.wav --model mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit  # another model
+qtts --stop-server                               # stop the server and free its memory
+```
+
+The default model is
+[mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit),
+which holds about 2.4 GB of RAM while idle.
+
+## How It Works
+
+Client and server talk over a Unix domain socket: a file-system path that only
+the current user can open, with no TCP port and no network exposure. The
+socket, the lock file, and the server log `qttsserv.log` live in
+`~/.cache/qttsserv/`.
+
+If no server listens, the client starts one detached from the terminal and
+waits until the model is loaded. A lock file guarantees at most one server per
+user, so concurrent clients never load the model twice. Nothing restarts the
+server after a crash; the next `qtts` call starts a fresh one.
+
+The server splits the text into chunks and generates each chunk in streaming
+mode. It sends about every 2 s of audio to the client while it still generates
+the rest of the chunk, so playback starts before the whole text is done. If the
+client disconnects, for example on Ctrl-C, the server aborts the generation.
+
+## License
+
+See [LICENSE](LICENSE) file.
