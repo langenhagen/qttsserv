@@ -7,10 +7,12 @@ is one frame:
     N bytes     JSON header (UTF-8)
     M bytes     raw payload; M is the header's "audio_bytes" value (default 0)
 
-Requests (client -> server), one frame per connection:
+Any number of clients can be connected at once. Requests (client -> server),
+one frame per connection:
 
-    {"command": "speak", "text": "...", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit",
-     "language": "auto", "ref_audio": "/abs/path.wav", "ref_text": "..." or null,
+    {"command": "speak", "text": "...",
+     "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit", "language": "auto",
+     "ref_audio": "/abs/path.wav", "ref_text": "..." or null,
      "sampling": {"temperature": 1.3, "top_k": 50, "top_p": 1.0,
                   "repetition_penalty": 1.5, "max_tokens": 300},
      "max_chars": 100, "seed": 0}
@@ -25,6 +27,12 @@ Responses (server -> client) to "speak":
     {"type": "done"}
 
 or {"type": "error", "message": "..."} instead, e.g. if the model fails to load.
+
+After "done" the client keeps the connection open until its playback ends, and
+then closes it. A new "speak" request cancels the running one: when it comes
+in, the server sends {"type": "stopped"} to the other open "speak" connection,
+at any point of the sequence above, even after "done", and that client stops
+playing at once.
 
 Responses to "stop": {"type": "done"}, then the server exits.
 """
@@ -83,12 +91,17 @@ def ensure_state_dir() -> None:
     STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
-def send_frame(sock: socket.socket, header: dict[str, Any], audio: bytes = b"") -> None:
-    """Send one frame with the given JSON header and optional audio payload."""
+def encode_frame(header: dict[str, Any], audio: bytes = b"") -> bytes:
+    """Return one frame with the given JSON header and optional audio payload."""
     if audio:
         header = header | {"audio_bytes": len(audio)}
     header_bytes = json.dumps(header).encode()
-    sock.sendall(HEADER_LENGTH.pack(len(header_bytes)) + header_bytes + audio)
+    return HEADER_LENGTH.pack(len(header_bytes)) + header_bytes + audio
+
+
+def send_frame(sock: socket.socket, header: dict[str, Any], audio: bytes = b"") -> None:
+    """Send one frame with the given JSON header and optional audio payload."""
+    sock.sendall(encode_frame(header, audio))
 
 
 def _exactly(data: bytes, expected_length: int) -> bytes:

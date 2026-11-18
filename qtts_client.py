@@ -11,6 +11,10 @@ The voice is cloned from the reference recording --voice. The optional
 --transcript holds the exact words spoken in that recording; with it, the model
 copies rhythm and accent as well as the timbre.
 
+A new qtts call cancels the running one: starting qtts while another one still
+speaks stops the other one. Each client stays connected to the server until its
+playback ends, so that the server can tell it to stop.
+
 Usage:
 
     qtts_client.py FILE --voice me.wav
@@ -68,6 +72,11 @@ from qtts_protocol import (
 
 if TYPE_CHECKING:
     import io
+    from collections.abc import Callable
+
+# What the reader thread hands the main thread: a frame, the reader's exit on
+# an error, or None once playback has ended.
+type _Event = tuple[dict[str, Any], bytes] | SystemExit | None
 
 SERVER_SCRIPT = Path(__file__).resolve().parent / "qtts_server.py"
 # First start downloads the model if it is not cached yet.
@@ -165,71 +174,171 @@ def _next_frame(rfile: io.BufferedIOBase) -> tuple[dict[str, Any], bytes]:
     return frame
 
 
-def _read_frames(
-    rfile: io.BufferedIOBase,
-    frames: queue.Queue[tuple[dict[str, Any], bytes] | SystemExit],
-) -> None:
-    """Move the server's frames into the queue until "done" or an exit."""
+def _read_frames(rfile: io.BufferedReader, events: queue.Queue[_Event]) -> None:
+    """Move the server's frames into the queue until "stopped" or the end.
+
+    After "done" the connection stays open while the audio still plays, so that
+    the server can still send "stopped"; the connection ending after "done" is
+    the normal end, not an error.
+    """
+    done = False
     try:
         while True:
+            if done and not rfile.peek(1):
+                return
             frame = _next_frame(rfile)
-            frames.put(frame)
+            events.put(frame)
             if frame[0]["type"] == "done":
+                done = True
+            elif frame[0]["type"] == "stopped":
                 return
     except SystemExit as exit_request:  # _next_frame exits on an error or a hang-up
-        frames.put(exit_request)
+        events.put(exit_request)
+
+
+class _Player:
+    """Play mono float32 PCM pieces as they arrive, from a PortAudio callback.
+
+    The callback runs on PortAudio's own thread, so the main thread stays free
+    to take in frames and can stop playback at any moment with abort().
+    Playback starts once prebuffer_s seconds of audio are buffered, or at
+    finish(). While the server falls behind, the callback plays silence.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int,
+        prebuffer_s: float,
+        on_finished: Callable[[], None],
+    ) -> None:
+        """Open the output stream; on_finished runs once playback has ended."""
+        import sounddevice as sd  # noqa: PLC0415 - lazy: loads PortAudio
+
+        self._callback_stop = sd.CallbackStop
+        self._sample_rate = sample_rate
+        self._prebuffer_bytes = int(sample_rate * prebuffer_s) * FLOAT32_BYTES
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._finishing = False
+        self._started = False
+        self._stream = sd.RawOutputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+            callback=self._callback,
+            finished_callback=on_finished,
+        )
+
+    # Any: sounddevice's cffi buffer and structs.
+    def _callback(
+        self,
+        outdata: Any,  # noqa: ANN401
+        _frames: int,
+        _time: Any,  # noqa: ANN401
+        _status: Any,  # noqa: ANN401
+    ) -> None:
+        """Fill outdata from the buffer, with silence for what is missing."""
+        with self._lock:
+            size = min(len(outdata), len(self._buffer))
+            outdata[:size] = self._buffer[:size]
+            del self._buffer[:size]
+            drained = self._finishing and not self._buffer
+        outdata[size:] = bytes(len(outdata) - size)
+        if drained:
+            raise self._callback_stop
+
+    def _start_once(self) -> None:
+        """Start the stream unless it has started already."""
+        if not self._started:
+            self._started = True
+            self._stream.start()
+
+    def add(self, audio: bytes) -> None:
+        """Buffer an audio piece; start playing once enough is buffered."""
+        with self._lock:
+            self._buffer += audio
+            ready = len(self._buffer) >= self._prebuffer_bytes
+        if ready:
+            self._start_once()
+
+    def finish(self) -> None:
+        """Play what is buffered, then stop; on_finished runs after that."""
+        with self._lock:
+            # Without trailing silence, the last word ends abruptly.
+            silence_frames = int(self._sample_rate * TRAILING_SILENCE_S)
+            self._buffer += bytes(silence_frames * FLOAT32_BYTES)
+            self._finishing = True
+        self._start_once()
+
+    def abort(self) -> None:
+        """Stop playing at once, dropping what is still buffered."""
+        self._stream.abort()
+
+    def close(self) -> None:
+        """Close the output stream, aborting it if it still plays."""
+        self._stream.close()
+
+
+def _play(events: queue.Queue[_Event], player: _Player) -> None:
+    """Hand the frames to the player until playback ends or the server stops it."""
+    while True:
+        event = events.get()
+        if event is None:
+            return
+        if isinstance(event, SystemExit):
+            raise event
+        header, audio = event
+        if header["type"] == "chunk":
+            print(header["index"])
+            print(header["text"])
+        elif header["type"] == "audio":
+            player.add(audio)
+        elif header["type"] == "done":
+            player.finish()
+        elif header["type"] == "stopped":
+            player.abort()
+            print("qtts: canceled by a new qtts call", file=sys.stderr)
+            return
 
 
 def speak(request: dict[str, Any], prebuffer_s: float) -> None:
     """Send the speak request to the server and play the audio pieces as they arrive.
 
-    A reader thread takes the frames off the socket while the main thread plays,
-    so the server never waits for playback. The first prebuffer_s seconds of audio
-    are held back before playback starts, to bridge the pauses in which the
-    server generates slower than the speakers play.
+    A reader thread takes the frames off the socket into a queue, and the main
+    thread hands them to a _Player, so the server never waits for playback. The
+    first prebuffer_s seconds of audio are held back before playback starts, to
+    bridge the pauses in which the server generates slower than the speakers
+    play. The connection stays open until playback ends, so that the server can
+    still send "stopped" when a new request cancels this one.
     """
-    import sounddevice as sd  # noqa: PLC0415 - lazy: loads PortAudio
-
     with (
         connect_or_start_server(request["model"]) as sock,
         sock.makefile("rb") as rfile,
     ):
         send_frame(sock, request)
         hello = _next_frame(rfile)[0]
+        # A new request can cancel this one while it still waits for the model.
+        if hello["type"] == "stopped":
+            print("qtts: canceled by a new qtts call", file=sys.stderr)
+            return
         print(f"model: {hello['model']}")
-        frames: queue.Queue[tuple[dict[str, Any], bytes] | SystemExit] = queue.Queue()
-        threading.Thread(target=_read_frames, args=(rfile, frames), daemon=True).start()
-        # Leaving the with block plays out the buffered audio before closing.
-        with sd.RawOutputStream(
-            samplerate=hello["sample_rate"],
-            channels=1,
-            dtype="float32",
-        ) as stream:
-            held: list[bytes] | None = []  # None once playback has started
-            held_s = 0.0
-            while True:
-                item = frames.get()
-                if isinstance(item, SystemExit):
-                    raise item
-                header, audio = item
-                if header["type"] == "done":
-                    if held:
-                        stream.write(b"".join(held))
-                    # Without trailing silence, the last word ends abruptly.
-                    silence_frames = int(hello["sample_rate"] * TRAILING_SILENCE_S)
-                    stream.write(bytes(silence_frames * FLOAT32_BYTES))
-                    return
-                if header["type"] == "chunk":
-                    print(header["index"])
-                    print(header["text"])
-                elif held is None:
-                    stream.write(audio)
-                else:
-                    held.append(audio)
-                    held_s += len(audio) / FLOAT32_BYTES / hello["sample_rate"]
-                    if held_s >= prebuffer_s:
-                        stream.write(b"".join(held))
-                        held = None
+        events: queue.Queue[_Event] = queue.Queue()
+        reader = threading.Thread(
+            target=_read_frames,
+            args=(rfile, events),
+            daemon=True,
+        )
+        reader.start()
+        player = _Player(hello["sample_rate"], prebuffer_s, lambda: events.put(None))
+        try:
+            _play(events, player)
+        finally:
+            player.close()
+            # Hanging up ends the reader thread's read and tells the server that
+            # this request is through; the server may have hung up already.
+            with suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+            reader.join()
 
 
 def main() -> None:

@@ -6,8 +6,9 @@ Keeps one [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) model loaded in a bac
 to the speakers while it is still generating.
 
 - `qtts_server.py` loads one model with
-  [mlx-audio](https://github.com/Blaizzy/mlx-audio) and serves requests, one at
-  a time. A request for another model drops the loaded model from memory first.
+  [mlx-audio](https://github.com/Blaizzy/mlx-audio) and serves any number of
+  clients, but generates for one request at a time. A request for another
+  model drops the loaded model from memory first.
 - `qtts_client.py` reads the text from a file, the clipboard, or stdin, and
   plays the audio as it arrives. Ctrl-C stops playback and generation.
 - `qtts.sh` runs the client through the project venv; link it into `PATH` as
@@ -64,6 +65,10 @@ The server splits the text into chunks and generates each chunk in streaming
 mode. It sends about every 2 s of audio to the client while it still generates
 the rest of the chunk, so playback starts before the whole text is done. If the
 client disconnects, for example on Ctrl-C, the server aborts the generation.
+
+A new `qtts` call cancels the running one. Each client stays connected until
+its playback ends. When a new request comes in, the server tells the running
+client to stop.
 
 ## License
 

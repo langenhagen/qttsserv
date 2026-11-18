@@ -2,9 +2,21 @@
 """Keep a Qwen3-TTS model loaded and stream speech to qtts_client.py.
 
 Loads one model with mlx-audio on the Apple Silicon GPU, then serves requests
-on a Unix domain socket, one at a time. Each request clones the voice of its
-reference recording, optionally with the recording's transcript. See
-qtts_protocol.py for the socket location and the message format.
+on a Unix domain socket with asyncio, so any number of clients can be connected
+at once. Each request clones the voice of its reference recording, optionally
+with the recording's transcript. See qtts_protocol.py for the socket location
+and the message format.
+
+A new "speak" request cancels the running one. When it comes in, the server
+sends {"type": "stopped"} to the running "speak" client, whether that one is
+still generating or already only playing, and that client stops its playback
+at once. A canceled request that is still generating stops at its next audio
+piece, so that the new one gets the model next. Clients keep their connection
+open until their own playback ends, so that a new request can still reach them.
+
+All MLX work, i.e. loading, generating, and freeing memory, runs on one worker
+thread. So the GPU work never blocks the event loop, and only one request
+generates at a time.
 
 Each request names its model. If that differs from the loaded one, the server
 drops the loaded model from memory first and then loads the requested one, so
@@ -27,24 +39,30 @@ Stop the server with `qtts_client.py --stop-server`, SIGTERM, or Ctrl-C.
 """
 
 import argparse
+import asyncio
 import fcntl
 import gc
+import json
 import logging
 import signal
-import socketserver
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from typing import IO, Any, cast
+from dataclasses import dataclass
+from typing import IO, TYPE_CHECKING, Any
 
 import chunking
 from qtts_protocol import (
     DEFAULT_MODEL,
+    HEADER_LENGTH,
     LOCK_PATH,
     LOG_PATH,
     SOCKET_PATH,
+    encode_frame,
     ensure_state_dir,
-    read_frame,
-    send_frame,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 logger = logging.getLogger("qttsserv")
 
@@ -55,7 +73,7 @@ def _release_cached_memory() -> None:
     On Apple Silicon the GPU shares the system RAM, so an idle server should not
     hold on to buffers from the last long text.
     """
-    import mlx.core as mx  # noqa: PLC0415 - loaded by main() already
+    import mlx.core as mx  # noqa: PLC0415 - loaded by _load_model() already
 
     mx.clear_cache()
     logger.info("MLX memory in use: %.2f GB", mx.get_active_memory() / 1e9)
@@ -78,14 +96,180 @@ def _load_model(model_id: str) -> Any:  # noqa: ANN401 - see above
     return model
 
 
-class SpeakHandler(socketserver.StreamRequestHandler):
-    """Handle one request: stream the speech of a text back, or stop."""
+def _seed(seed: int) -> None:
+    """Make the next generations reproducible."""
+    import mlx.core as mx  # noqa: PLC0415 - loaded by _load_model() already
 
-    def _speak(self, server: QttsServer, request: dict[str, Any]) -> None:
+    mx.random.seed(seed)
+
+
+# Any: see _load_model.
+def _start_chunk(
+    model: Any,  # noqa: ANN401
+    chunk: str,
+    request: dict[str, Any],
+) -> Iterator[Any]:
+    """Start generating one chunk in streaming mode; return its result iterator."""
+    # split_pattern="" because chunking.py split the text already.
+    return model.generate(
+        text=chunk,
+        lang_code=request["language"],
+        ref_audio=request["ref_audio"],
+        ref_text=request["ref_text"],
+        split_pattern="",
+        stream=True,
+        **request["sampling"],
+    )
+
+
+def _next_audio(results: Iterator[Any]) -> bytes | None:
+    """Generate the next audio piece as mono float32 PCM; None after the last one."""
+    import numpy as np  # noqa: PLC0415 - loaded with mlx-audio already
+
+    result = next(results, None)
+    if result is None:
+        return None
+    return np.array(result.audio, dtype=np.float32).tobytes()
+
+
+async def _read_request(reader: asyncio.StreamReader) -> dict[str, Any] | None:
+    """Read the client's one request frame; None if it hung up before sending it."""
+    try:
+        length_bytes = await reader.readexactly(HEADER_LENGTH.size)
+    except asyncio.IncompleteReadError as error:
+        if error.partial:
+            raise
+        return None
+    (header_length,) = HEADER_LENGTH.unpack(length_bytes)
+    return json.loads(await reader.readexactly(header_length))
+
+
+@dataclass(eq=False)
+class _Session:
+    """One connected "speak" request; canceled once a new one comes in."""
+
+    writer: asyncio.StreamWriter
+    canceled: bool = False
+
+
+class QttsServer:
+    """Holds the one loaded Qwen3-TTS model and the connected "speak" requests."""
+
+    # Any: see _load_model.
+    def __init__(
+        self,
+        model_id: str,
+        model: Any,  # noqa: ANN401
+        executor: ThreadPoolExecutor,
+        stop_requested: asyncio.Event,
+    ) -> None:
+        """Keep the model, the MLX worker thread, and the stop signal."""
+        self.model_id: str | None = model_id
+        self.model = model
+        self.executor = executor
+        self.stop_requested = stop_requested
+        # One model on one GPU: one request generates at a time.
+        self.generation_lock = asyncio.Lock()
+        self.sessions: set[_Session] = set()
+
+    # Any: whatever function returns.
+    async def run_mlx(
+        self,
+        function: Callable[..., Any],
+        *args: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401
+        """Run function(*args) on the MLX worker thread and return its result."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.executor, function, *args)
+
+    def model_for(self, model_id: str) -> Any:  # noqa: ANN401 - see __init__
+        """Return the model model_id, replacing the loaded model if it differs.
+
+        Runs on the MLX worker thread.
+        """
+        if model_id != self.model_id:
+            logger.info("dropping model %s", self.model_id)
+            # Drop the only reference before loading, so that the two models
+            # are never in memory at the same time. Reset model_id first, so
+            # that a failed load is retried on the next request.
+            self.model_id = None
+            self.model = None
+            gc.collect()
+            _release_cached_memory()
+            self.model = _load_model(model_id)
+            self.model_id = model_id
+        return self.model
+
+    async def handle_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Read the client's request and dispatch on its command."""
+        try:
+            request = await _read_request(reader)
+            if request is None:
+                return
+            if request["command"] == "stop":
+                logger.info("stop requested")
+                writer.write(encode_frame({"type": "done"}))
+                await writer.drain()
+                self.stop_requested.set()
+                return
+            await self._serve_speak(request, reader, writer)
+        except ConnectionError:
+            logger.info("client disconnected, generation aborted")
+        finally:
+            writer.close()
+            with suppress(ConnectionError):
+                await writer.wait_closed()
+
+    def _cancel(self, session: _Session) -> None:
+        """Cancel a running request and tell its client to stop playing."""
+        if session.canceled:
+            return
+        session.canceled = True
+        if not session.writer.is_closing():
+            logger.info("canceling a running request for a new one")
+            session.writer.write(encode_frame({"type": "stopped"}))
+
+    async def _serve_speak(
+        self,
+        request: dict[str, Any],
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Cancel the running request, generate this one, and wait for its playback."""
+        session = _Session(writer)
+        # Each request cancels its predecessor, so at most one is running; a
+        # loop still covers one that is canceled but not yet disconnected.
+        for running in self.sessions:
+            self._cancel(running)
+        self.sessions.add(session)
+        try:
+            async with self.generation_lock:
+                # Another request may have come in while this one waited.
+                if session.canceled:
+                    return
+                await self._generate(session, request)
+            # The client plays on after "done" and hangs up when it is through;
+            # until then, a new request can still cancel it.
+            await reader.read()
+        finally:
+            self.sessions.discard(session)
+
+    async def _send(
+        self,
+        session: _Session,
+        header: dict[str, Any],
+        audio: bytes = b"",
+    ) -> None:
+        """Send one frame to the session's client; raise if it hung up."""
+        session.writer.write(encode_frame(header, audio))
+        await session.writer.drain()
+
+    async def _generate(self, session: _Session, request: dict[str, Any]) -> None:
         """Generate the text chunk by chunk and send each audio piece once ready."""
-        import mlx.core as mx  # noqa: PLC0415 - loaded with mlx-audio already
-        import numpy as np  # noqa: PLC0415 - see above
-
         text = request["text"]
         logger.info(
             "speak: %d characters, model %s, language %s, voice %s, sampling %s, "
@@ -99,81 +283,42 @@ class SpeakHandler(socketserver.StreamRequestHandler):
             request["seed"],
         )
         try:
-            model = server.model_for(request["model"])
-        # Catch any load error, e.g. a mistyped model ID, to report it to the client.
-        except Exception as error:  # pylint: disable=broad-exception-caught
-            logger.exception("loading model %s failed", request["model"])
-            send_frame(self.request, {"type": "error", "message": str(error)})
-            return
-        if request["seed"] != 0:
-            mx.random.seed(request["seed"])
-        hello = {"type": "hello", "model": server.model_id}
-        send_frame(self.request, hello | {"sample_rate": model.sample_rate})
-        for index, chunk in enumerate(
-            chunking.split_chunks(text, request["max_chars"]),
-        ):
-            send_frame(self.request, {"type": "chunk", "index": index, "text": chunk})
-            # split_pattern="" because chunking.py split the text already.
-            results = model.generate(
-                text=chunk,
-                lang_code=request["language"],
-                ref_audio=request["ref_audio"],
-                ref_text=request["ref_text"],
-                split_pattern="",
-                stream=True,
-                **request["sampling"],
-            )
-            for result in results:
-                audio = np.array(result.audio, dtype=np.float32).tobytes()
-                send_frame(self.request, {"type": "audio"}, audio)
-        send_frame(self.request, {"type": "done"})
-        logger.info("speak: done")
-
-    def handle(self) -> None:
-        """Read the request frame and dispatch on its command."""
-        server = cast("QttsServer", self.server)
-        frame = read_frame(self.rfile)
-        if frame is None:
-            return
-        request, _ = frame
-        if request["command"] == "stop":
-            logger.info("stop requested")
-            server.stop_requested = True
-            send_frame(self.request, {"type": "done"})
-            return
-        try:
-            self._speak(server, request)
-        except BrokenPipeError, ConnectionResetError:
-            logger.info("client disconnected, generation aborted")
+            try:
+                model = await self.run_mlx(self.model_for, request["model"])
+            # Report any load error, e.g. a mistyped model ID, to the client.
+            except Exception as error:  # pylint: disable=broad-exception-caught
+                logger.exception("loading model %s failed", request["model"])
+                await self._send(session, {"type": "error", "message": str(error)})
+                return
+            if request["seed"] != 0:
+                await self.run_mlx(_seed, request["seed"])
+            hello = {"type": "hello", "model": self.model_id}
+            await self._send(session, hello | {"sample_rate": model.sample_rate})
+            for index, chunk in enumerate(
+                chunking.split_chunks(text, request["max_chars"]),
+            ):
+                if session.canceled:
+                    logger.info("speak: canceled by a new request")
+                    return
+                await self._send(
+                    session,
+                    {"type": "chunk", "index": index, "text": chunk},
+                )
+                results = await self.run_mlx(_start_chunk, model, chunk, request)
+                try:
+                    while (
+                        audio := await self.run_mlx(_next_audio, results)
+                    ) is not None:
+                        if session.canceled:
+                            logger.info("speak: canceled by a new request")
+                            return
+                        await self._send(session, {"type": "audio"}, audio)
+                finally:
+                    await self.run_mlx(results.close)
+            await self._send(session, {"type": "done"})
+            logger.info("speak: done")
         finally:
-            _release_cached_memory()
-
-
-class QttsServer(socketserver.UnixStreamServer):
-    """Unix socket server that holds the one loaded Qwen3-TTS model."""
-
-    # Any: see _load_model.
-    def __init__(self, model_id: str, model: Any) -> None:  # noqa: ANN401
-        """Bind the socket and keep the model for the request handler."""
-        super().__init__(str(SOCKET_PATH), SpeakHandler)
-        self.model_id: str | None = model_id
-        self.model = model
-        self.stop_requested = False
-
-    def model_for(self, model_id: str) -> Any:  # noqa: ANN401 - see __init__
-        """Return the model model_id, replacing the loaded model if it differs."""
-        if model_id != self.model_id:
-            logger.info("dropping model %s", self.model_id)
-            # Drop the only reference before loading, so that the two models
-            # are never in memory at the same time. Reset model_id first, so
-            # that a failed load is retried on the next request.
-            self.model_id = None
-            self.model = None
-            gc.collect()
-            _release_cached_memory()
-            self.model = _load_model(model_id)
-            self.model_id = model_id
-        return self.model
+            await self.run_mlx(_release_cached_memory)
 
 
 def _acquire_single_instance_lock() -> IO[str] | None:
@@ -190,9 +335,31 @@ def _acquire_single_instance_lock() -> IO[str] | None:
     return lock_file
 
 
-def _raise_keyboard_interrupt(_signum: int, _frame: object) -> None:
-    """Turn SIGTERM into the same clean shutdown path as Ctrl-C."""
-    raise KeyboardInterrupt
+async def _serve(model_id: str) -> None:
+    """Load the model, then serve clients until a "stop" request, SIGTERM, or Ctrl-C."""
+    loop = asyncio.get_running_loop()
+    stop_requested = asyncio.Event()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stop_requested.set)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx") as executor:
+        # Pass the model straight in: a local variable here would keep it in
+        # memory after QttsServer.model_for() swapped it out.
+        server = QttsServer(
+            model_id,
+            await loop.run_in_executor(executor, _load_model, model_id),
+            executor,
+            stop_requested,
+        )
+        unix_server = await asyncio.start_unix_server(
+            server.handle_client,
+            path=str(SOCKET_PATH),
+        )
+        logger.info("ready on %s", SOCKET_PATH)
+        await stop_requested.wait()
+        logger.info("stopping")
+        unix_server.close()
+        unix_server.close_clients()
+        await unix_server.wait_closed()
 
 
 def main() -> None:
@@ -216,27 +383,19 @@ def main() -> None:
         logger.info("another qttsserv server is already running; exiting")
         return
 
-    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     logger.info("starting (log file for autostarted servers: %s)", LOG_PATH)
     # A socket file left over from a crashed server blocks bind(). Holding the
     # lock guarantees that no live server uses it.
     SOCKET_PATH.unlink(missing_ok=True)
-    # Pass the model straight in: a local variable here would keep it in memory
-    # after QttsServer.model_for() swapped it out.
-    server = QttsServer(args.model, _load_model(args.model))
-    logger.info("ready on %s", SOCKET_PATH)
     try:
-        while not server.stop_requested:
-            server.handle_request()
-    except KeyboardInterrupt:
-        logger.info("interrupted")
+        asyncio.run(_serve(args.model))
     finally:
-        server.server_close()
         SOCKET_PATH.unlink(missing_ok=True)
         lock_file.close()
         logger.info("stopped")
 
 
 if __name__ == "__main__":
+    # Ctrl-C before the event loop installs its signal handlers.
     with suppress(KeyboardInterrupt):
         main()
