@@ -12,8 +12,9 @@ The voice is cloned from the reference recording --voice. The optional
 copies rhythm and accent as well as the timbre.
 
 A new qtts call cancels the running one: starting qtts while another one still
-speaks stops the other one. Each client stays connected to the server until its
-playback ends, so that the server can tell it to stop.
+speaks stops the other one, and so does --stop-playback. Each client stays
+connected to the server until its playback ends, so that the server can tell it
+to stop.
 
 Usage:
 
@@ -37,6 +38,8 @@ Usage:
     qtts_client.py FILE --voice me.wav --prebuffer 2.3
         start playing after 2.3 s of audio are ready instead of at once (the
         default); potentially avoids short pauses on slow machines
+    qtts_client.py --stop-playback
+        cancel the running qtts call, so it stops speaking; the server keeps running
     qtts_client.py --stop-server
         stop the running server, freeing its memory
 
@@ -151,17 +154,32 @@ def connect_or_start_server(model: str) -> socket.socket:
         time.sleep(STARTUP_POLL_INTERVAL_S)
 
 
-def stop_server() -> None:
-    """Ask the running server to exit; do nothing if none is running."""
+def _send_command(command: str) -> bool:
+    """Send command to the running server and wait for its reply.
+
+    Return False, without starting a server, if none is running.
+    """
     try:
         sock = _connect()
     except FileNotFoundError, ConnectionRefusedError:
         print("qtts: server is not running", file=sys.stderr)
-        return
+        return False
     with sock, sock.makefile("rb") as rfile:
-        send_frame(sock, {"command": "stop"})
+        send_frame(sock, {"command": command})
         read_frame(rfile)
-    print("qtts: server stopped", file=sys.stderr)
+    return True
+
+
+def stop_server() -> None:
+    """Ask the running server to exit; do nothing if none is running."""
+    if _send_command("stop"):
+        print("qtts: server stopped", file=sys.stderr)
+
+
+def stop_playback() -> None:
+    """Cancel the running qtts call, if any; the server keeps running."""
+    if _send_command("stop_playback"):
+        print("qtts: playback stopped", file=sys.stderr)
 
 
 def _next_frame(rfile: io.BufferedIOBase) -> tuple[dict[str, Any], bytes]:
@@ -297,7 +315,7 @@ def _play(events: queue.Queue[_Event], player: _Player) -> None:
             player.finish()
         elif header["type"] == "stopped":
             player.abort()
-            print("qtts: canceled by a new qtts call", file=sys.stderr)
+            print("qtts: canceled by another qtts call", file=sys.stderr)
             return
 
 
@@ -319,7 +337,7 @@ def speak(request: dict[str, Any], prebuffer_s: float) -> None:
         hello = _next_frame(rfile)[0]
         # A new request can cancel this one while it still waits for the model.
         if hello["type"] == "stopped":
-            print("qtts: canceled by a new qtts call", file=sys.stderr)
+            print("qtts: canceled by another qtts call", file=sys.stderr)
             return
         print(f"model: {hello['model']}")
         events: queue.Queue[_Event] = queue.Queue()
@@ -444,6 +462,11 @@ def main() -> None:
         "(default: %(default)s)",
     )
     parser.add_argument(
+        "--stop-playback",
+        action="store_true",
+        help="cancel the running qtts call and exit; the server keeps running",
+    )
+    parser.add_argument(
         "--stop-server",
         action="store_true",
         help="stop the running qtts server and exit",
@@ -452,6 +475,9 @@ def main() -> None:
 
     if args.stop_server:
         stop_server()
+        return
+    if args.stop_playback:
+        stop_playback()
         return
 
     if args.voice is None:

@@ -40,6 +40,7 @@ qtts FILE --voice me.wav --temperature 0.7       # steadier delivery; default 1.
 qtts FILE --voice me.wav --seed 42               # same delivery on every run; default 0 is random
 qtts FILE --voice me.wav --model-size 0.6B --precision bf16  # smaller model, full precision
 qtts FILE --voice me.wav --prebuffer 2.3         # prebuffer to avoid pauses on slow machines
+qtts --stop-playback                             # silence the running qtts call
 qtts --stop-server                               # stop the server and free its memory
 ```
 

@@ -13,6 +13,8 @@ still generating or already only playing, and that client stops its playback
 at once. A canceled request that is still generating stops at its next audio
 piece, so that the new one gets the model next. Clients keep their connection
 open until their own playback ends, so that a new request can still reach them.
+A "stop_playback" request cancels the running one the same way, without
+starting a new one.
 
 All MLX work, i.e. loading, generating, and freeing memory, runs on one worker
 thread. So the GPU work never blocks the event loop, and only one request
@@ -216,6 +218,12 @@ class QttsServer:
                 await writer.drain()
                 self.stop_requested.set()
                 return
+            if request["command"] == "stop_playback":
+                logger.info("stop playback requested")
+                self._cancel_all()
+                writer.write(encode_frame({"type": "done"}))
+                await writer.drain()
+                return
             await self._serve_speak(request, reader, writer)
         except ConnectionError:
             logger.info("client disconnected, generation aborted")
@@ -224,14 +232,19 @@ class QttsServer:
             with suppress(ConnectionError):
                 await writer.wait_closed()
 
-    def _cancel(self, session: _Session) -> None:
-        """Cancel a running request and tell its client to stop playing."""
-        if session.canceled:
-            return
-        session.canceled = True
-        if not session.writer.is_closing():
-            logger.info("canceling a running request for a new one")
-            session.writer.write(encode_frame({"type": "stopped"}))
+    def _cancel_all(self) -> None:
+        """Cancel the running requests and tell their clients to stop playing.
+
+        Each request cancels its predecessor, so at most one is running; the
+        loop still covers one that is canceled but not yet disconnected.
+        """
+        for session in self.sessions:
+            if session.canceled:
+                continue
+            session.canceled = True
+            if not session.writer.is_closing():
+                logger.info("canceling the running request")
+                session.writer.write(encode_frame({"type": "stopped"}))
 
     async def _serve_speak(
         self,
@@ -241,10 +254,7 @@ class QttsServer:
     ) -> None:
         """Cancel the running request, generate this one, and wait for its playback."""
         session = _Session(writer)
-        # Each request cancels its predecessor, so at most one is running; a
-        # loop still covers one that is canceled but not yet disconnected.
-        for running in self.sessions:
-            self._cancel(running)
+        self._cancel_all()
         self.sessions.add(session)
         try:
             async with self.generation_lock:
@@ -298,7 +308,7 @@ class QttsServer:
                 chunking.split_chunks(text, request["max_chars"]),
             ):
                 if session.canceled:
-                    logger.info("speak: canceled by a new request")
+                    logger.info("speak: canceled")
                     return
                 await self._send(
                     session,
@@ -310,7 +320,7 @@ class QttsServer:
                         audio := await self.run_mlx(_next_audio, results)
                     ) is not None:
                         if session.canceled:
-                            logger.info("speak: canceled by a new request")
+                            logger.info("speak: canceled")
                             return
                         await self._send(session, {"type": "audio"}, audio)
                 finally:

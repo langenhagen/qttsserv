@@ -16,6 +16,7 @@ one frame per connection:
      "sampling": {"temperature": 1.3, "top_k": 50, "top_p": 1.0,
                   "repetition_penalty": 1.5, "max_tokens": 300},
      "max_chars": 100, "seed": 0}
+    {"command": "stop_playback"}
     {"command": "stop"}
 
 Responses (server -> client) to "speak":
@@ -33,6 +34,9 @@ then closes it. A new "speak" request cancels the running one: when it comes
 in, the server sends {"type": "stopped"} to the other open "speak" connection,
 at any point of the sequence above, even after "done", and that client stops
 playing at once.
+
+Responses to "stop_playback": {"type": "done"}, after the server has sent
+{"type": "stopped"} to every open "speak" connection.
 
 Responses to "stop": {"type": "done"}, then the server exits.
 """
