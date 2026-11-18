@@ -29,6 +29,7 @@ sudo ln -sf "$PWD/qtts.sh" /usr/local/bin/qtts  # link the CLI so you can use it
 ## Usage
 
 ```bash
+qtts --help
 qtts FILE --voice me.wav                         # speak a text file in the voice of me.wav
 qtts --clipboard --voice me.wav                  # speak the clipboard
 echo "hello" | qtts --voice me.wav               # speak piped text
@@ -37,6 +38,7 @@ qtts FILE --voice me.wav --language german       # set the language instead of a
 qtts FILE --voice me.wav --temperature 0.7       # steadier delivery; default 1.3, higher is livelier
 qtts FILE --voice me.wav --seed 42               # same delivery on every run; default 0 is random
 qtts FILE --voice me.wav --model-size 0.6B --precision bf16  # smaller model, full precision
+qtts FILE --voice me.wav --prebuffer 2.3         # prebuffer to avoid pauses on slow machines
 qtts --stop-server                               # stop the server and free its memory
 ```
 

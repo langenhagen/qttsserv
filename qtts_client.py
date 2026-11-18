@@ -30,6 +30,9 @@ Usage:
     qtts_client.py FILE --voice me.wav --model-size 1.7B --precision bf16
         speak with the larger model at full precision instead of the default
         0.6B at 4 bits; the server swaps out its loaded model
+    qtts_client.py FILE --voice me.wav --prebuffer 2.3
+        start playing after 2.3 s of audio are ready instead of at once (the
+        default); potentially avoids short pauses on slow machines
     qtts_client.py --stop-server
         stop the running server, freeing its memory
 
@@ -38,10 +41,12 @@ Usage:
 """
 
 import argparse
+import queue
 import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -68,6 +73,10 @@ SERVER_SCRIPT = Path(__file__).resolve().parent / "qtts_server.py"
 # First start downloads the model if it is not cached yet.
 STARTUP_TIMEOUT_S = 300
 STARTUP_POLL_INTERVAL_S = 0.1
+TRAILING_SILENCE_S = 0.3
+FLOAT32_BYTES = 4
+# Seconds of audio to collect before playback starts; see --prebuffer.
+DEFAULT_PREBUFFER_S = 0.0
 
 
 def _clipboard_read_command() -> list[str]:
@@ -156,8 +165,29 @@ def _next_frame(rfile: io.BufferedIOBase) -> tuple[dict[str, Any], bytes]:
     return frame
 
 
-def speak(request: dict[str, Any]) -> None:
-    """Send the speak request to the server and play the audio pieces as they arrive."""
+def _read_frames(
+    rfile: io.BufferedIOBase,
+    frames: queue.Queue[tuple[dict[str, Any], bytes] | SystemExit],
+) -> None:
+    """Move the server's frames into the queue until "done" or an exit."""
+    try:
+        while True:
+            frame = _next_frame(rfile)
+            frames.put(frame)
+            if frame[0]["type"] == "done":
+                return
+    except SystemExit as exit_request:  # _next_frame exits on an error or a hang-up
+        frames.put(exit_request)
+
+
+def speak(request: dict[str, Any], prebuffer_s: float) -> None:
+    """Send the speak request to the server and play the audio pieces as they arrive.
+
+    A reader thread takes the frames off the socket while the main thread plays,
+    so the server never waits for playback. The first prebuffer_s seconds of audio
+    are held back before playback starts, to bridge the pauses in which the
+    server generates slower than the speakers play.
+    """
     import sounddevice as sd  # noqa: PLC0415 - lazy: loads PortAudio
 
     with (
@@ -167,21 +197,39 @@ def speak(request: dict[str, Any]) -> None:
         send_frame(sock, request)
         hello = _next_frame(rfile)[0]
         print(f"model: {hello['model']}")
+        frames: queue.Queue[tuple[dict[str, Any], bytes] | SystemExit] = queue.Queue()
+        threading.Thread(target=_read_frames, args=(rfile, frames), daemon=True).start()
         # Leaving the with block plays out the buffered audio before closing.
         with sd.RawOutputStream(
             samplerate=hello["sample_rate"],
             channels=1,
             dtype="float32",
         ) as stream:
+            held: list[bytes] | None = []  # None once playback has started
+            held_s = 0.0
             while True:
-                header, audio = _next_frame(rfile)
+                item = frames.get()
+                if isinstance(item, SystemExit):
+                    raise item
+                header, audio = item
                 if header["type"] == "done":
+                    if held:
+                        stream.write(b"".join(held))
+                    # Without trailing silence, the last word ends abruptly.
+                    silence_frames = int(hello["sample_rate"] * TRAILING_SILENCE_S)
+                    stream.write(bytes(silence_frames * FLOAT32_BYTES))
                     return
                 if header["type"] == "chunk":
                     print(header["index"])
                     print(header["text"])
-                else:
+                elif held is None:
                     stream.write(audio)
+                else:
+                    held.append(audio)
+                    held_s += len(audio) / FLOAT32_BYTES / hello["sample_rate"]
+                    if held_s >= prebuffer_s:
+                        stream.write(b"".join(held))
+                        held = None
 
 
 def main() -> None:
@@ -278,6 +326,15 @@ def main() -> None:
         "full precision (default: %(default)s)",
     )
     parser.add_argument(
+        "--prebuffer",
+        type=float,
+        default=DEFAULT_PREBUFFER_S,
+        metavar="SECONDS",
+        help="seconds of audio to collect before playback starts; more hides "
+        "the pauses of a server slower than real time, 0 starts at once "
+        "(default: %(default)s)",
+    )
+    parser.add_argument(
         "--stop-server",
         action="store_true",
         help="stop the running qtts server and exit",
@@ -320,6 +377,7 @@ def main() -> None:
             "max_chars": args.max_chars,
             "seed": args.seed,
         },
+        args.prebuffer,
     )
 
 
