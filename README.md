@@ -36,13 +36,15 @@ qtts FILE --voice me.wav --transcript me.txt     # clone closer with the words s
 qtts FILE --voice me.wav --language german       # set the language instead of auto-detecting it
 qtts FILE --voice me.wav --temperature 0.7       # steadier delivery; default 1.3, higher is livelier
 qtts FILE --voice me.wav --seed 42               # same delivery on every run; default 0 is random
-qtts FILE --voice me.wav --model mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit  # another model
+qtts FILE --voice me.wav --model-size 0.6B --precision bf16  # smaller model, full precision
 qtts --stop-server                               # stop the server and free its memory
 ```
 
-The default model is
+`--model-size` is `1.7B` (default) or `0.6B`, and `--precision` is `4` (default), `5`,
+`6`, `8`, or `bf16` for full precision; fewer bits are smaller and faster. The
+default,
 [mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit),
-which holds about 2.4 GB of RAM while idle.
+holds about 2.4 GB of RAM while idle.
 
 ## How It Works
 

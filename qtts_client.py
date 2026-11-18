@@ -27,9 +27,9 @@ Usage:
         speak the text file steadier than the default 1.3; higher values sound livelier
     qtts_client.py FILE --voice me.wav --seed 42
         speak the text file the same way every time
-    qtts_client.py FILE --voice me.wav --model ID
-        speak with another model, e.g. mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit;
-        the server swaps out its loaded model
+    qtts_client.py FILE --voice me.wav --model-size 1.7B --precision bf16
+        speak with the larger model at full precision instead of the default
+        0.6B at 4 bits; the server swaps out its loaded model
     qtts_client.py --stop-server
         stop the running server, freeing its memory
 
@@ -48,11 +48,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from qtts_protocol import (
-    DEFAULT_MODEL,
+    DEFAULT_MODEL_SIZE,
+    DEFAULT_PRECISION,
     LANGUAGES,
     LOG_PATH,
+    MODEL_SIZES,
+    PRECISIONS,
     SOCKET_PATH,
     ensure_state_dir,
+    model_id,
     read_frame,
     send_frame,
 )
@@ -260,11 +264,18 @@ def main() -> None:
         help="random seed for reproducible speech; 0 for random (default: %(default)s)",
     )
     parser.add_argument(
-        "--model",
-        "-m",
-        default=DEFAULT_MODEL,
-        help="Qwen3-TTS Base model, Hugging Face repo or local path; "
-        "the server swaps out its loaded model if it differs (default: %(default)s)",
+        "--model-size",
+        choices=MODEL_SIZES,
+        default=DEFAULT_MODEL_SIZE,
+        help="model size; 0.6B is smaller and faster, 1.7B clones a voice more "
+        "faithfully (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=PRECISIONS,
+        default=DEFAULT_PRECISION,
+        help="bits of the model weights, fewer is smaller and faster; bf16 is "
+        "full precision (default: %(default)s)",
     )
     parser.add_argument(
         "--stop-server",
@@ -294,7 +305,7 @@ def main() -> None:
         {
             "command": "speak",
             "text": text,
-            "model": args.model,
+            "model": model_id(args.model_size, args.precision),
             "language": args.language,
             # Absolute, because the server runs in another working directory.
             "ref_audio": str(args.voice.expanduser().resolve(strict=True)),

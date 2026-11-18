@@ -9,7 +9,7 @@ is one frame:
 
 Requests (client -> server), one frame per connection:
 
-    {"command": "speak", "text": "...", "model": "mlx-community/...",
+    {"command": "speak", "text": "...", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit",
      "language": "auto", "ref_audio": "/abs/path.wav", "ref_text": "..." or null,
      "sampling": {"temperature": 1.3, "top_k": 50, "top_p": 1.0,
                   "repetition_penalty": 1.5, "max_tokens": 300},
@@ -38,9 +38,22 @@ if TYPE_CHECKING:
     import io
     import socket
 
-# The 4-bit quantized Base model: the smallest and fastest; clones a voice
-# from a reference recording.
-DEFAULT_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit"
+# Qwen3-TTS Base model sizes and precisions available as mlx-community repos;
+# all of them clone a voice from a reference recording. Smaller and fewer bits
+# are faster and use less RAM, at some cost to quality.
+MODEL_SIZES = ["0.6B", "1.7B"]
+PRECISIONS = ["4", "5", "6", "8", "bf16"]
+DEFAULT_MODEL_SIZE = "1.7B"
+DEFAULT_PRECISION = "4"
+
+
+def model_id(model_size: str, precision: str) -> str:
+    """Return the Hugging Face repo ID of the Base model in this size and precision."""
+    bits = precision if precision == "bf16" else f"{precision}bit"
+    return f"mlx-community/Qwen3-TTS-12Hz-{model_size}-Base-{bits}"
+
+
+DEFAULT_MODEL = model_id(DEFAULT_MODEL_SIZE, DEFAULT_PRECISION)
 
 # Languages of Qwen3-TTS; "auto" detects the language from the text.
 LANGUAGES = [
