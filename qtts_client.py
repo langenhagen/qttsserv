@@ -319,8 +319,21 @@ def _play(events: queue.Queue[_Event], player: _Player) -> None:
             return
 
 
-def speak(request: dict[str, Any], prebuffer_s: float) -> None:
+def _format_settings(args: argparse.Namespace) -> str:
+    """Return the speech settings of args as long-form CLI flags, defaults included."""
+    # The input file and the action flags are no speech settings.
+    not_settings = {"file", "clipboard", "stop_playback", "stop_server"}
+    return "\n".join(
+        f"{name.replace('_', '-')}={value}"
+        for name, value in vars(args).items()
+        if name not in not_settings
+    )
+
+
+def speak(request: dict[str, Any], prebuffer_s: float, settings: str) -> None:
     """Send the speak request to the server and play the audio pieces as they arrive.
+
+    The settings line is printed after the model line.
 
     A reader thread takes the frames off the socket into a queue, and the main
     thread hands them to a _Player, so the server never waits for playback. The
@@ -340,6 +353,7 @@ def speak(request: dict[str, Any], prebuffer_s: float) -> None:
             print("qtts: canceled by another qtts call", file=sys.stderr)
             return
         print(f"model: {hello['model']}")
+        print(f"settings: {settings}")
         events: queue.Queue[_Event] = queue.Queue()
         reader = threading.Thread(
             target=_read_frames,
@@ -513,6 +527,7 @@ def main() -> None:
             "seed": args.seed,
         },
         args.prebuffer,
+        _format_settings(args),
     )
 
 
