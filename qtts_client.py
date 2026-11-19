@@ -422,14 +422,14 @@ def main() -> None:
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=300,
+        default=900,
         help="max tokens per chunk; 12.5 tokens are 1 s of audio "
         "(default: %(default)s)",
     )
     parser.add_argument(
         "--max-chars",
         type=int,
-        default=100,
+        default=300,
         help="max characters per chunk (default: %(default)s)",
     )
     parser.add_argument(

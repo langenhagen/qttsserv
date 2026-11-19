@@ -14,8 +14,7 @@ to the speakers while it is still generating.
 - `qtts.sh` runs the client through the project venv; link it into `PATH` as
   `qtts`.
 - `qtts_protocol.py` holds the socket location and the message format.
-- `chunking.py` splits the text into chunks of at most 100 characters; copied
-  from my
+- `chunking.py` splits the text into chunks; copied from my
   [qwen3-tts-hello](https://github.com/langenhagen/experiments-and-tutorials/blob/master/Python/qwen3-tts-hello/chunking.py).
 
 If not already running, the first CLI invocation starts the server.
