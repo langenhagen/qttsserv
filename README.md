@@ -30,17 +30,17 @@ sudo ln -sf "$PWD/qtts.sh" /usr/local/bin/qtts  # link the CLI so you can use it
 
 ```bash
 qtts --help
-qtts FILE --voice me.wav                         # speak a text file in the voice of me.wav
-qtts --clipboard --voice me.wav                  # speak the clipboard
-echo "hello" | qtts --voice me.wav               # speak piped text
-qtts FILE --voice me.wav --transcript me.txt     # clone closer with the words spoken in me.wav
-qtts FILE --voice me.wav --language german       # set the language instead of auto-detecting it
-qtts FILE --voice me.wav --temperature 0.7       # steadier delivery; default 1.3, higher is livelier
-qtts FILE --voice me.wav --seed 42               # same delivery on every run; default 0 is random
+qtts FILE --voice me.wav                            # speak a text file in the voice of me.wav
+qtts --clipboard --voice me.wav                     # speak the clipboard
+printf 'One. Two.\n\nThree.' | qtts --voice me.wav  # stream piped text as it arrives
+qtts FILE --voice me.wav --transcript me.txt        # clone closer with the words spoken in me.wav
+qtts FILE --voice me.wav --language german          # set the language instead of auto-detecting it
+qtts FILE --voice me.wav --temperature 0.7          # steadier delivery; default 1.3, higher is livelier
+qtts FILE --voice me.wav --seed 42                  # same delivery on every run; default 0 is random
 qtts FILE --voice me.wav --model-size 0.6B --precision bf16  # smaller model, full precision
-qtts FILE --voice me.wav --prebuffer 2.3         # prebuffer to avoid pauses on slow machines
-qtts --stop-playback                             # silence the running qtts call
-qtts --stop-server                               # stop the server and free its memory
+qtts FILE --voice me.wav --prebuffer 2.3            # prebuffer to avoid pauses on slow machines
+qtts --stop-playback                                # silence the running qtts call
+qtts --stop-server                                  # stop the server and free its memory
 ```
 
 `--model-size` is `1.7B` (default) or `0.6B`, and `--precision` is `4` (default), `5`,
@@ -65,6 +65,11 @@ The server splits the text into chunks and generates each chunk in streaming
 mode. It sends about every 2 s of audio to the client while it still generates
 the rest of the chunk, so playback starts before the whole text is done. If the
 client disconnects, for example on Ctrl-C, the server aborts the generation.
+
+When stdin is a pipe, the client sends text to the server as the producer
+writes it. The server speaks each chunk as soon as its boundaries are final,
+so a slow producer does not delay the text already received. Chunk boundaries
+are the same as for a text file: blank lines, sentence ends, and `--max-chars`.
 
 A new `qtts` call cancels the running one. Each client stays connected until
 its playback ends. When a new request comes in, the server tells the running

@@ -7,17 +7,23 @@ is one frame:
     N bytes     JSON header (UTF-8)
     M bytes     raw payload; M is the header's "audio_bytes" value (default 0)
 
-Any number of clients can be connected at once. Requests (client -> server),
-one frame per connection:
+Any number of clients can be connected at once. Requests (client -> server):
 
-    {"command": "speak", "text": "...",
+    {"command": "speak",
      "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit", "language": "auto",
      "ref_audio": "/abs/path.wav", "ref_text": "..." or null,
      "sampling": {"temperature": 1.3, "top_k": 50, "top_p": 1.0,
                   "repetition_penalty": 1.5, "max_tokens": 900},
      "max_chars": 300, "seed": 0}
+    {"command": "text", "text": "..."}  zero or more, after "speak"
+    {"command": "finish"}              once, after the last "text"
     {"command": "stop_playback"}
     {"command": "stop"}
+
+A "speak" request may stream its text: the client sends "text" frames as text
+arrives, then "finish" at the end. The server speaks every chunk as soon as the
+text received so far determines it, and sends "done" after "finish". A client
+that already has all its text sends "text" once and "finish" right away.
 
 Responses (server -> client) to "speak":
 

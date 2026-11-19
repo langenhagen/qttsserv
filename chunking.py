@@ -10,6 +10,8 @@ quotes or brackets like `." ` or `!) `). Without a sentence end, cut after the
 last "; ", else after the last ", ", else at the last space, else at
 max_chars. Once the rest of the paragraph fits, it is the last chunk. So short
 sentences are packed together greedily, in order.
+
+IncrementalChunks applies the same rules to text that arrives in pieces.
 """
 
 import itertools
@@ -60,3 +62,39 @@ def split_chunks(text: str, max_chars: int) -> list[str]:
             if paragraph.strip()
         ),
     )
+
+
+class IncrementalChunks:
+    """Split text arriving in pieces into the same chunks as split_chunks.
+
+    feed() returns the chunks that later text can no longer change: all but the
+    last of the chunks seen so far, or all of them when the text ends at a
+    paragraph break. flush() returns the remaining chunks once the text ends.
+    Re-splitting the text seen so far on each piece is cheap for speech text
+    and keeps this identical to split_chunks.
+    """
+
+    def __init__(self, max_chars: int) -> None:
+        """Start with no text seen."""
+        self.max_chars = max_chars
+        self._text = ""
+        self._emitted = 0
+
+    def feed(self, text: str) -> list[str]:
+        """Append text and return the chunks that are now final."""
+        self._text += text
+        chunks = split_chunks(self._text, self.max_chars)
+        at_paragraph_end = re.search(r"\n\s*\n$", self._text) is not None
+        final = chunks if at_paragraph_end else chunks[:-1]
+        emitted = self._emitted
+        new = final[emitted:]
+        self._emitted += len(new)
+        return new
+
+    def flush(self) -> list[str]:
+        """Return the remaining chunks, including the last one."""
+        chunks = split_chunks(self._text, self.max_chars)
+        emitted = self._emitted
+        remaining = chunks[emitted:]
+        self._emitted = len(chunks)
+        return remaining

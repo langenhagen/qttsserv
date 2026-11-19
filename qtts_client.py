@@ -3,9 +3,11 @@
 the model itself.
 
 Reads text from a file, a pipe, or the clipboard, sends it to the server, and
-plays the speech while the server is still generating it. Starts the server in
-the background if it is not running; the server then keeps running after this
-client exits. The server is never restarted automatically after a failure.
+plays the speech while the server is still generating it. Piped text is sent
+as it arrives, so speaking can start before the producer exits. Starts the
+server in the background if it is not running; the server then keeps running
+after this client exits. The server is never restarted automatically after a
+failure.
 
 The voice is cloned from the reference recording --voice. The optional
 --transcript holds the exact words spoken in that recording; with it, the model
@@ -23,7 +25,7 @@ Usage:
     qtts_client.py --clipboard --voice me.wav
         speak the text from the clipboard
     echo "hi" | qtts_client.py --voice me.wav
-        speak text piped to stdin
+        speak text piped to stdin as it arrives
     qtts_client.py FILE --voice me.wav --transcript me.txt
         clone the voice more closely with the words spoken in me.wav
     qtts_client.py FILE --voice me.wav --language german
@@ -48,6 +50,8 @@ Usage:
 """
 
 import argparse
+import codecs
+import os
 import queue
 import shutil
 import socket
@@ -75,7 +79,7 @@ from qtts_protocol import (
 
 if TYPE_CHECKING:
     import io
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 # What the reader thread hands the main thread: a frame, the reader's exit on
 # an error, or None once playback has ended.
@@ -108,6 +112,25 @@ def _clipboard_read_command() -> list[str]:
 def read_clipboard() -> str:
     """Return the text currently stored in the clipboard."""
     return subprocess.check_output(_clipboard_read_command(), text=True)
+
+
+def _stdin_pieces() -> Iterator[str]:
+    """Yield text as soon as a read from the pipe returns, decoding across reads."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    stdin_fd = sys.stdin.fileno()
+    while data := os.read(stdin_fd, 4096):
+        if text := decoder.decode(data):
+            yield text
+    if text := decoder.decode(b"", final=True):
+        yield text
+
+
+def _send_text(sock: socket.socket, pieces: Iterator[str]) -> None:
+    """Send the text pieces and then finish; a canceled call closes the socket."""
+    with suppress(OSError):
+        for text in pieces:
+            send_frame(sock, {"command": "text", "text": text})
+        send_frame(sock, {"command": "finish"})
 
 
 def _connect() -> socket.socket:
@@ -330,17 +353,24 @@ def _format_settings(args: argparse.Namespace) -> str:
     )
 
 
-def speak(request: dict[str, Any], prebuffer_s: float, settings: str) -> None:
-    """Send the speak request to the server and play the audio pieces as they arrive.
+def speak(
+    request: dict[str, Any],
+    pieces: Iterator[str],
+    prebuffer_s: float,
+    settings: str,
+) -> None:
+    """Send the request and its text, then play the audio pieces as they arrive.
 
     The settings line is printed after the model line.
 
-    A reader thread takes the frames off the socket into a queue, and the main
-    thread hands them to a _Player, so the server never waits for playback. The
-    first prebuffer_s seconds of audio are held back before playback starts, to
-    bridge the pauses in which the server generates slower than the speakers
-    play. The connection stays open until playback ends, so that the server can
-    still send "stopped" when a new request cancels this one.
+    A reader thread takes the frames off the socket into a queue, and a sender
+    thread sends the text as the input produces it, so the server can start a
+    chunk before all the text has arrived. The main thread hands the frames to
+    a _Player. The first prebuffer_s seconds of audio are held back before
+    playback starts, to bridge the pauses in which the server generates slower
+    than the speakers play. The connection stays open until playback ends, so
+    that the server can still send "stopped" when a new request cancels this
+    one.
     """
     with (
         connect_or_start_server(request["model"]) as sock,
@@ -361,6 +391,12 @@ def speak(request: dict[str, Any], prebuffer_s: float, settings: str) -> None:
             daemon=True,
         )
         reader.start()
+        sender = threading.Thread(
+            target=_send_text,
+            args=(sock, pieces),
+            daemon=True,
+        )
+        sender.start()
         player = _Player(hello["sample_rate"], prebuffer_s, lambda: events.put(None))
         try:
             _play(events, player)
@@ -497,11 +533,11 @@ def main() -> None:
     if args.voice is None:
         parser.error("--voice is required")
     if args.file:
-        text = Path(args.file).read_text(encoding="utf-8")
+        pieces = iter([Path(args.file).read_text(encoding="utf-8")])
     elif args.clipboard:
-        text = read_clipboard()
+        pieces = iter([read_clipboard()])
     elif not sys.stdin.isatty():
-        text = sys.stdin.read()
+        pieces = _stdin_pieces()
     else:
         parser.print_usage()
         sys.exit(2)
@@ -510,7 +546,6 @@ def main() -> None:
     speak(
         {
             "command": "speak",
-            "text": text,
             "model": model_id(args.model_size, args.precision),
             "language": args.language,
             # Absolute, because the server runs in another working directory.
@@ -526,6 +561,7 @@ def main() -> None:
             "max_chars": args.max_chars,
             "seed": args.seed,
         },
+        pieces,
         args.prebuffer,
         _format_settings(args),
     )

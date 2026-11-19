@@ -24,10 +24,11 @@ Each request names its model. If that differs from the loaded one, the server
 drops the loaded model from memory first and then loads the requested one, so
 only one model is ever in memory.
 
-The server splits the text into chunks (see chunking.py) and generates each
-chunk in streaming mode: mlx-audio yields about every 2 s of audio while it is
-still generating the rest of the chunk, and the server sends each piece on
-right away.
+The client may send a request's text in pieces. The server splits the text it
+has into chunks (see chunking.py) and generates each chunk as soon as its
+boundaries are final, in streaming mode: mlx-audio yields about every 2 s of
+audio while it is still generating the rest of the chunk, and the server sends
+each piece on right away.
 
 A lock file ensures that at most one server per user runs. A second server
 exits with code 0 right away, without loading a model.
@@ -152,6 +153,7 @@ class _Session:
 
     writer: asyncio.StreamWriter
     canceled: bool = False
+    text_queue: asyncio.Queue[str | None] | None = None
 
 
 class QttsServer:
@@ -242,9 +244,42 @@ class QttsServer:
             if session.canceled:
                 continue
             session.canceled = True
+            # Unblock a generator still waiting for the next piece of text.
+            if session.text_queue is not None:
+                session.text_queue.put_nowait(None)
             if not session.writer.is_closing():
                 logger.info("canceling the running request")
                 session.writer.write(encode_frame({"type": "stopped"}))
+
+    async def _collect_text(
+        self,
+        reader: asyncio.StreamReader,
+        text_queue: asyncio.Queue[str | None],
+    ) -> None:
+        """Queue the request's text frames, then wait for the client to hang up.
+
+        A None sentinel ends the text. After that the client keeps the
+        connection open while its audio plays, so a new request can still
+        cancel this one; further frames from this client are ignored.
+        """
+        text_ended = False
+        try:
+            while True:
+                frame = await _read_request(reader)
+                if frame is None:
+                    return
+                if text_ended:
+                    continue
+                if frame.get("command") == "text":
+                    await text_queue.put(frame["text"])
+                elif frame.get("command") == "finish":
+                    text_ended = True
+                    await text_queue.put(None)
+        except asyncio.IncompleteReadError:
+            pass
+        finally:
+            if not text_ended:
+                await text_queue.put(None)
 
     async def _serve_speak(
         self,
@@ -256,16 +291,22 @@ class QttsServer:
         session = _Session(writer)
         self._cancel_all()
         self.sessions.add(session)
+        text_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        session.text_queue = text_queue
+        collector = asyncio.create_task(self._collect_text(reader, text_queue))
         try:
             async with self.generation_lock:
                 # Another request may have come in while this one waited.
                 if session.canceled:
                     return
-                await self._generate(session, request)
+                await self._generate(session, request, text_queue)
             # The client plays on after "done" and hangs up when it is through;
             # until then, a new request can still cancel it.
-            await reader.read()
+            await collector
         finally:
+            collector.cancel()
+            with suppress(asyncio.CancelledError):
+                await collector
             self.sessions.discard(session)
 
     async def _send(
@@ -278,13 +319,40 @@ class QttsServer:
         session.writer.write(encode_frame(header, audio))
         await session.writer.drain()
 
-    async def _generate(self, session: _Session, request: dict[str, Any]) -> None:
+    async def _emit_chunk(
+        self,
+        session: _Session,
+        model: Any,  # noqa: ANN401 - see _load_model
+        request: dict[str, Any],
+        index: int,
+        chunk: str,
+    ) -> bool:
+        """Stream one chunk's audio; return False if the session was canceled."""
+        if session.canceled:
+            logger.info("speak: canceled")
+            return False
+        await self._send(session, {"type": "chunk", "index": index, "text": chunk})
+        results = await self.run_mlx(_start_chunk, model, chunk, request)
+        try:
+            while (audio := await self.run_mlx(_next_audio, results)) is not None:
+                if session.canceled:
+                    logger.info("speak: canceled")
+                    return False
+                await self._send(session, {"type": "audio"}, audio)
+        finally:
+            await self.run_mlx(results.close)
+        return True
+
+    async def _generate(
+        self,
+        session: _Session,
+        request: dict[str, Any],
+        text_queue: asyncio.Queue[str | None],
+    ) -> None:
         """Generate the text chunk by chunk and send each audio piece once ready."""
-        text = request["text"]
         logger.info(
-            "speak: %d characters, model %s, language %s, voice %s, sampling %s, "
-            "max chars %d, seed %d",
-            len(text),
+            "speak: model %s, language %s, voice %s, sampling %s, max chars %d, "
+            "seed %d",
             request["model"],
             request["language"],
             request["ref_audio"],
@@ -304,29 +372,30 @@ class QttsServer:
                 await self.run_mlx(_seed, request["seed"])
             hello = {"type": "hello", "model": self.model_id}
             await self._send(session, hello | {"sample_rate": model.sample_rate})
-            for index, chunk in enumerate(
-                chunking.split_chunks(text, request["max_chars"]),
-            ):
-                if session.canceled:
-                    logger.info("speak: canceled")
+            chunker = chunking.IncrementalChunks(request["max_chars"])
+            index = 0
+            while True:
+                piece = await text_queue.get()
+                if piece is None:
+                    break
+                for chunk in chunker.feed(piece):
+                    if not await self._emit_chunk(
+                        session,
+                        model,
+                        request,
+                        index,
+                        chunk,
+                    ):
+                        return
+                    index += 1
+            for chunk in chunker.flush():
+                if not await self._emit_chunk(session, model, request, index, chunk):
                     return
-                await self._send(
-                    session,
-                    {"type": "chunk", "index": index, "text": chunk},
-                )
-                results = await self.run_mlx(_start_chunk, model, chunk, request)
-                try:
-                    while (
-                        audio := await self.run_mlx(_next_audio, results)
-                    ) is not None:
-                        if session.canceled:
-                            logger.info("speak: canceled")
-                            return
-                        await self._send(session, {"type": "audio"}, audio)
-                finally:
-                    await self.run_mlx(results.close)
+                index += 1
+            if session.canceled:
+                return
             await self._send(session, {"type": "done"})
-            logger.info("speak: done")
+            logger.info("speak: done (%d chunks)", index)
         finally:
             await self.run_mlx(_release_cached_memory)
 
