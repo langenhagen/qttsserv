@@ -3,11 +3,12 @@
 the model itself.
 
 Reads text from a file, a pipe, or the clipboard, sends it to the server, and
-plays the speech while the server is still generating it. Piped text is sent
-as it arrives, so speaking can start before the producer exits. Starts the
-server in the background if it is not running; the server then keeps running
-after this client exits. The server is never restarted automatically after a
-failure.
+plays the speech while the server is still generating it. With --out-file, the
+generated speech is written to a WAV file instead of being played. Piped text
+is sent as it arrives, so speaking can start before the producer exits. Starts
+the server in the background if it is not running; the server then keeps
+running after this client exits. The server is never restarted automatically
+after a failure.
 
 With --voice, the voice is cloned from that reference recording; the optional
 --transcript holds the exact words spoken in it, so the model copies rhythm and
@@ -28,6 +29,8 @@ Usage:
         speak the text file in the described voice with the VoiceDesign model
     qtts_client.py FILE --voice me.wav
         speak the text file in the voice of the recording me.wav
+    qtts_client.py FILE --voice me.wav -o out.wav
+        write the synthesized speech to out.wav instead of playing it
     qtts_client.py --clipboard --voice me.wav
         speak the text from the clipboard
     echo "hi" | qtts_client.py --voice me.wav
@@ -89,6 +92,8 @@ from qtts_protocol import (
 if TYPE_CHECKING:
     import io
     from collections.abc import Callable, Iterator
+
+    import soundfile as sf
 
 # What the reader thread hands the main thread: a frame, the reader's exit on
 # an error, or None once playback has ended.
@@ -352,10 +357,41 @@ def _play(events: queue.Queue[_Event], player: _Player, verbose: bool) -> None:
             return
 
 
+def _write(events: queue.Queue[_Event], outfile: sf.SoundFile, verbose: bool) -> None:
+    """Write the frames to outfile instead of playing them."""
+    import numpy as np  # noqa: PLC0415 - lazy: only --out-file needs it
+
+    while True:
+        event = events.get()
+        if event is None:
+            return
+        if isinstance(event, SystemExit):
+            raise event
+        header, audio = event
+        if header["type"] == "chunk":
+            if verbose:
+                print(header["index"])
+            print(header["text"])
+        elif header["type"] == "audio":
+            outfile.write(np.frombuffer(audio, dtype=np.float32))
+        elif header["type"] == "done":
+            return
+        elif header["type"] == "stopped":
+            print("qtts: canceled by another qtts call", file=sys.stderr)
+            return
+
+
 def _format_settings(args: argparse.Namespace) -> str:
     """Return the speech settings of args as long-form CLI flags, defaults included."""
     # The input file and the action flags are no speech settings.
-    not_settings = {"file", "clipboard", "verbose", "stop_playback", "stop_server"}
+    not_settings = {
+        "file",
+        "clipboard",
+        "verbose",
+        "stop_playback",
+        "stop_server",
+        "out_file",
+    }
     return "\n".join(
         f"{name.replace('_', '-')}={value}"
         for name, value in vars(args).items()
@@ -369,8 +405,9 @@ def speak(
     prebuffer_s: float,
     settings: str,
     verbose: bool,
+    out_file: Path | None = None,
 ) -> None:
-    """Send the request and its text, then play the audio pieces as they arrive.
+    """Send the request and its text, then play it or write it to a file.
 
     With verbose, the model and the settings line are printed before the chunks,
     and each chunk's index is printed before its text.
@@ -378,11 +415,11 @@ def speak(
     A reader thread takes the frames off the socket into a queue, and a sender
     thread sends the text as the input produces it, so the server can start a
     chunk before all the text has arrived. The main thread hands the frames to
-    a _Player. The first prebuffer_s seconds of audio are held back before
-    playback starts, to bridge the pauses in which the server generates slower
-    than the speakers play. The connection stays open until playback ends, so
-    that the server can still send "stopped" when a new request cancels this
-    one.
+    a _Player, or writes them to out_file with soundfile instead of playing
+    them. The first prebuffer_s seconds of audio are held back before playback
+    starts, to bridge the pauses in which the server generates slower than the
+    speakers play. The connection stays open until playback ends, so that the
+    server can still send "stopped" when a new request cancels this one.
     """
     with (
         connect_or_start_server(request["model"]) as sock,
@@ -410,11 +447,28 @@ def speak(
             daemon=True,
         )
         sender.start()
-        player = _Player(hello["sample_rate"], prebuffer_s, lambda: events.put(None))
+        player: _Player | None = None
         try:
-            _play(events, player, verbose)
+            if out_file is not None:
+                import soundfile as sf  # noqa: PLC0415 - lazy: only --out-file needs it
+
+                with sf.SoundFile(
+                    out_file,
+                    "w",
+                    channels=1,
+                    samplerate=hello["sample_rate"],
+                ) as outfile:
+                    _write(events, outfile, verbose)
+            else:
+                player = _Player(
+                    hello["sample_rate"],
+                    prebuffer_s,
+                    lambda: events.put(None),
+                )
+                _play(events, player, verbose)
         finally:
-            player.close()
+            if player is not None:
+                player.close()
             # Hanging up ends the reader thread's read and tells the server that
             # this request is through; the server may have hung up already.
             with suppress(OSError):
@@ -423,7 +477,7 @@ def speak(
 
 
 def main() -> None:
-    """Send the text from a file, clipboard, or stdin pipe to the server and play it."""
+    """Send text from a file, clipboard, or stdin pipe to the server and play or save it."""
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -434,6 +488,16 @@ def main() -> None:
         "-c",
         action="store_true",
         help="speak text from the clipboard",
+    )
+    parser.add_argument(
+        "--out-file",
+        "--output",
+        "--out",
+        "-o",
+        dest="out_file",
+        type=Path,
+        metavar="FILE",
+        help="write the generated audio to FILE as a WAV file instead of playing it",
     )
     parser.add_argument(
         "--verbose",
@@ -606,6 +670,7 @@ def main() -> None:
         args.prebuffer,
         _format_settings(args),
         args.verbose,
+        args.out_file,
     )
 
 

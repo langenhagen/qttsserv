@@ -10,7 +10,8 @@ to the speakers while it is still generating.
   clients, but generates for one request at a time. A request for another
   model drops the loaded model from memory first.
 - `qtts_client.py` reads the text from a file, the clipboard, or stdin, and
-  plays the audio as it arrives. Ctrl-C stops playback and generation.
+  plays the audio as it arrives, or writes it to a file.
+  Ctrl-C stops playback and generation.
 - `qtts.sh` runs the client through the project venv; link it into `PATH` as
   `qtts`.
 - `qtts_protocol.py` holds the socket location and the message format.
@@ -34,6 +35,7 @@ qtts FILE                                           # speak a text file in rando
 qtts FILE --voice me.wav                            # speak a text file in the cloned voice of me.wav
 qtts FILE --voice me.wav --transcript me.txt        # speak a text file in a more accurately cloned voice
 qtts FILE --voice-design "A deep, calm male voice"  # describe a new voice (1.7B only)
+qtts FILE --voice me.wav -o out.wav                 # write to a WAV file instead of playing
 qtts --clipboard --voice me.wav                     # speak the clipboard
 printf 'One. Two.\n\nThree.' | qtts --voice me.wav  # stream piped text as it arrives
 qtts FILE --voice me.wav --language german          # set the language instead of auto-detecting it
