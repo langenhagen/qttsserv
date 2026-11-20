@@ -33,6 +33,7 @@ qtts --help
 qtts FILE                                           # speak a text file in random voice
 qtts FILE --voice me.wav                            # speak a text file in the cloned voice of me.wav
 qtts FILE --voice me.wav --transcript me.txt        # speak a text file in a more accurately cloned voice
+qtts FILE --voice-design "A deep, calm male voice"  # describe a new voice (1.7B only)
 qtts --clipboard --voice me.wav                     # speak the clipboard
 printf 'One. Two.\n\nThree.' | qtts --voice me.wav  # stream piped text as it arrives
 qtts FILE --voice me.wav --language german          # set the language instead of auto-detecting it
@@ -50,6 +51,11 @@ qtts --stop-server                                  # stop the server and free i
 default,
 [mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit),
 holds about 2.4 GB of RAM while idle.
+
+`--voice-design` loads the `VoiceDesign` model, which speaks in the voice you
+describe in words instead of cloning a reference. It needs `--model-size 1.7B`;
+there is no 0.6B VoiceDesign model. It cannot be combined with `--voice` or
+`--transcript`.
 
 ## How It Works
 

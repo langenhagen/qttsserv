@@ -12,6 +12,7 @@ Any number of clients can be connected at once. Requests (client -> server):
     {"command": "speak",
      "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit", "language": "auto",
      "ref_audio": "/abs/path.wav" or null, "ref_text": "..." or null,
+     "instruct": null,
      "sampling": {"temperature": 1.3, "top_k": 50, "top_p": 1.0,
                   "repetition_penalty": 1.5, "max_tokens": 900},
      "max_chars": 300, "seed": 0}
@@ -20,7 +21,9 @@ Any number of clients can be connected at once. Requests (client -> server):
     {"command": "stop_playback"}
     {"command": "stop"}
 
-A null ref_audio speaks in a random voice; no voice is cloned.
+A null ref_audio speaks in a random voice; no voice is cloned. A non-null
+instruct instead describes a new voice for the VoiceDesign model to speak in;
+that model has no 0.6B variant and ignores ref_audio.
 
 A "speak" request may stream its text: the client sends "text" frames as text
 arrives, then "finish" at the end. The server speaks every chunk as soon as the
@@ -58,19 +61,23 @@ if TYPE_CHECKING:
     import io
     import socket
 
-# Qwen3-TTS Base model sizes and precisions available as mlx-community repos;
-# all of them clone a voice from a reference recording. Smaller and fewer bits
-# are faster and use less RAM, at some cost to quality.
+# Qwen3-TTS model sizes and precisions available as mlx-community repos;
+# smaller and fewer bits are faster and use less RAM, at some cost to quality.
+# VoiceDesign has only the 1.7B size.
 MODEL_SIZES = ["0.6B", "1.7B"]
 PRECISIONS = ["4", "5", "6", "8", "bf16"]
 DEFAULT_MODEL_SIZE = "1.7B"
 DEFAULT_PRECISION = "4"
 
 
-def model_id(model_size: str, precision: str) -> str:
-    """Return the Hugging Face repo ID of the Base model in this size and precision."""
+def model_id(model_size: str, precision: str, kind: str = "Base") -> str:
+    """Return the repo ID of model kind in this size and precision.
+
+    Kind is "Base" for a cloned or random voice, or "VoiceDesign" for a voice
+    described in words.
+    """
     bits = precision if precision == "bf16" else f"{precision}bit"
-    return f"mlx-community/Qwen3-TTS-12Hz-{model_size}-Base-{bits}"
+    return f"mlx-community/Qwen3-TTS-12Hz-{model_size}-{kind}-{bits}"
 
 
 DEFAULT_MODEL = model_id(DEFAULT_MODEL_SIZE, DEFAULT_PRECISION)

@@ -12,7 +12,8 @@ failure.
 With --voice, the voice is cloned from that reference recording; the optional
 --transcript holds the exact words spoken in it, so the model copies rhythm and
 accent as well as the timbre. Without --voice, the model speaks in a random
-voice.
+voice. With --voice-design, the VoiceDesign model instead speaks in the voice
+described in words; it has no 0.6B variant and cannot be combined with --voice.
 
 A new qtts call cancels the running one: starting qtts while another one still
 speaks stops the other one, and so does --stop-playback. Each client stays
@@ -23,6 +24,8 @@ Usage:
 
     qtts_client.py FILE
         speak the text file in a random voice
+    qtts_client.py FILE --voice-design "A deep, calm male voice"
+        speak the text file in the described voice with the VoiceDesign model
     qtts_client.py FILE --voice me.wav
         speak the text file in the voice of the recording me.wav
     qtts_client.py --clipboard --voice me.wav
@@ -37,9 +40,9 @@ Usage:
         speak the text file steadier than the default 1.3; higher values sound livelier
     qtts_client.py FILE --voice me.wav --seed 42
         speak the text file the same way every time
-    qtts_client.py FILE --voice me.wav --model-size 1.7B --precision bf16
-        speak with the larger model at full precision instead of the default
-        0.6B at 4 bits; the server swaps out its loaded model
+    qtts_client.py FILE --voice me.wav --precision bf16
+        speak with full-precision weights instead of the default 4 bits;
+        the server swaps out its loaded model
     qtts_client.py FILE --voice me.wav --prebuffer 2.3
         start playing after 2.3 s of audio are ready instead of at once (the
         default); potentially avoids short pauses on slow machines
@@ -446,6 +449,12 @@ def main() -> None:
         help="reference recording of the voice to clone; omit for a random voice",
     )
     parser.add_argument(
+        "--voice-design",
+        metavar="DESCRIPTION",
+        help="describe a new voice in words, e.g. 'A deep, calm male voice'; "
+        "uses the VoiceDesign model (1.7B only) instead of cloning",
+    )
+    parser.add_argument(
         "--transcript",
         "-t",
         type=Path,
@@ -508,8 +517,8 @@ def main() -> None:
         "--model-size",
         choices=MODEL_SIZES,
         default=DEFAULT_MODEL_SIZE,
-        help="model size; 0.6B is smaller and faster, 1.7B clones a voice more "
-        "faithfully (default: %(default)s)",
+        help="model size; 0.6B is smaller and faster, 1.7B is more faithful and "
+        "the only size with voice design (default: %(default)s)",
     )
     parser.add_argument(
         "--precision",
@@ -546,6 +555,17 @@ def main() -> None:
         stop_playback()
         return
 
+    voice_design = args.voice_design.strip() if args.voice_design else None
+    if args.voice_design is not None:
+        if not voice_design:
+            parser.error("--voice-design must describe a voice")
+        if args.voice or args.transcript:
+            parser.error(
+                "--voice-design cannot be combined with --voice or --transcript"
+            )
+        if args.model_size == "0.6B":
+            parser.error("--voice-design has no 0.6B model; use --model-size 1.7B")
+
     if args.file:
         pieces = iter([Path(args.file).read_text(encoding="utf-8")])
     elif args.clipboard:
@@ -560,13 +580,18 @@ def main() -> None:
     speak(
         {
             "command": "speak",
-            "model": model_id(args.model_size, args.precision),
+            "model": model_id(
+                args.model_size,
+                args.precision,
+                kind="VoiceDesign" if voice_design else "Base",
+            ),
             "language": args.language,
             # Absolute, because the server runs in another working directory.
             "ref_audio": str(args.voice.expanduser().resolve(strict=True))
             if args.voice
             else None,
             "ref_text": ref_text,
+            "instruct": voice_design,
             "sampling": {
                 "temperature": args.temperature,
                 "top_k": args.top_k,

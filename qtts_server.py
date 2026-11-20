@@ -5,8 +5,9 @@ Loads one model with mlx-audio on the Apple Silicon GPU, then serves requests
 on a Unix domain socket with asyncio, so any number of clients can be connected
 at once. A request with a reference recording clones that voice, optionally
 using the recording's transcript; without one, the Base model speaks in a
-random voice. See qtts_protocol.py for the socket location and the message
-format.
+random voice. A request with an instruction uses the VoiceDesign model to
+speak in the voice described in words. See qtts_protocol.py for the socket
+location and the message format.
 
 A new "speak" request cancels the running one. When it comes in, the server
 sends {"type": "stopped"} to the running "speak" client, whether that one is
@@ -92,8 +93,11 @@ def _load_model(model_id: str) -> Any:  # noqa: ANN401 - see above
     logger.info("loading model %s", model_id)
     model = load(model_id)
     # Compile the GPU kernels once, so that the first real request is as fast
-    # as all later ones.
-    for _ in model.generate(text="Hello.", split_pattern=""):
+    # as all later ones. VoiceDesign refuses to generate without a description.
+    warmup: dict[str, Any] = {}
+    if getattr(model.config, "tts_model_type", "base") == "voice_design":
+        warmup["instruct"] = "A clear, neutral voice"
+    for _ in model.generate(text="Hello.", split_pattern="", **warmup):
         pass
     _release_cached_memory()
     logger.info("loaded model %s", model_id)
@@ -120,6 +124,7 @@ def _start_chunk(
         lang_code=request["language"],
         ref_audio=request["ref_audio"],
         ref_text=request["ref_text"],
+        instruct=request["instruct"],
         split_pattern="",
         stream=True,
         **request["sampling"],
@@ -356,7 +361,7 @@ class QttsServer:
             "seed %d",
             request["model"],
             request["language"],
-            request["ref_audio"],
+            request["instruct"] or request["ref_audio"],
             request["sampling"],
             request["max_chars"],
             request["seed"],
