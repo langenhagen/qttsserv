@@ -3,9 +3,10 @@
 
 Loads one model with mlx-audio on the Apple Silicon GPU, then serves requests
 on a Unix domain socket with asyncio, so any number of clients can be connected
-at once. Each request clones the voice of its reference recording, optionally
-with the recording's transcript. See qtts_protocol.py for the socket location
-and the message format.
+at once. A request with a reference recording clones that voice, optionally
+using the recording's transcript; without one, the Base model speaks in a
+random voice. See qtts_protocol.py for the socket location and the message
+format.
 
 A new "speak" request cancels the running one. When it comes in, the server
 sends {"type": "stopped"} to the running "speak" client, whether that one is

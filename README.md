@@ -30,10 +30,11 @@ sudo ln -sf "$PWD/qtts.sh" /usr/local/bin/qtts  # link the CLI so you can use it
 
 ```bash
 qtts --help
-qtts FILE --voice me.wav                            # speak a text file in the voice of me.wav
+qtts FILE                                           # speak a text file in random voice
+qtts FILE --voice me.wav                            # speak a text file in the cloned voice of me.wav
+qtts FILE --voice me.wav --transcript me.txt        # speak a text file in a more accurately cloned voice
 qtts --clipboard --voice me.wav                     # speak the clipboard
 printf 'One. Two.\n\nThree.' | qtts --voice me.wav  # stream piped text as it arrives
-qtts FILE --voice me.wav --transcript me.txt        # clone closer with the words spoken in me.wav
 qtts FILE --voice me.wav --language german          # set the language instead of auto-detecting it
 qtts FILE --voice me.wav --temperature 0.7          # steadier delivery; default 1.3, higher is livelier
 qtts FILE --voice me.wav --seed 42                  # same delivery on every run; default 0 is random

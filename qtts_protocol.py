@@ -11,7 +11,7 @@ Any number of clients can be connected at once. Requests (client -> server):
 
     {"command": "speak",
      "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit", "language": "auto",
-     "ref_audio": "/abs/path.wav", "ref_text": "..." or null,
+     "ref_audio": "/abs/path.wav" or null, "ref_text": "..." or null,
      "sampling": {"temperature": 1.3, "top_k": 50, "top_p": 1.0,
                   "repetition_penalty": 1.5, "max_tokens": 900},
      "max_chars": 300, "seed": 0}
@@ -19,6 +19,8 @@ Any number of clients can be connected at once. Requests (client -> server):
     {"command": "finish"}              once, after the last "text"
     {"command": "stop_playback"}
     {"command": "stop"}
+
+A null ref_audio speaks in a random voice; no voice is cloned.
 
 A "speak" request may stream its text: the client sends "text" frames as text
 arrives, then "finish" at the end. The server speaks every chunk as soon as the

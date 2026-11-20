@@ -9,9 +9,10 @@ server in the background if it is not running; the server then keeps running
 after this client exits. The server is never restarted automatically after a
 failure.
 
-The voice is cloned from the reference recording --voice. The optional
---transcript holds the exact words spoken in that recording; with it, the model
-copies rhythm and accent as well as the timbre.
+With --voice, the voice is cloned from that reference recording; the optional
+--transcript holds the exact words spoken in it, so the model copies rhythm and
+accent as well as the timbre. Without --voice, the model speaks in a random
+voice.
 
 A new qtts call cancels the running one: starting qtts while another one still
 speaks stops the other one, and so does --stop-playback. Each client stays
@@ -20,6 +21,8 @@ to stop.
 
 Usage:
 
+    qtts_client.py FILE
+        speak the text file in a random voice
     qtts_client.py FILE --voice me.wav
         speak the text file in the voice of the recording me.wav
     qtts_client.py --clipboard --voice me.wav
@@ -440,7 +443,7 @@ def main() -> None:
         "--voice",
         type=Path,
         metavar="AUDIO_FILE",
-        help="reference recording of the voice to clone; required for speaking",
+        help="reference recording of the voice to clone; omit for a random voice",
     )
     parser.add_argument(
         "--transcript",
@@ -543,8 +546,6 @@ def main() -> None:
         stop_playback()
         return
 
-    if args.voice is None:
-        parser.error("--voice is required")
     if args.file:
         pieces = iter([Path(args.file).read_text(encoding="utf-8")])
     elif args.clipboard:
@@ -562,7 +563,9 @@ def main() -> None:
             "model": model_id(args.model_size, args.precision),
             "language": args.language,
             # Absolute, because the server runs in another working directory.
-            "ref_audio": str(args.voice.expanduser().resolve(strict=True)),
+            "ref_audio": str(args.voice.expanduser().resolve(strict=True))
+            if args.voice
+            else None,
             "ref_text": ref_text,
             "sampling": {
                 "temperature": args.temperature,
