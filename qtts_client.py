@@ -40,6 +40,9 @@ Usage:
     qtts_client.py FILE --voice me.wav --prebuffer 2.3
         start playing after 2.3 s of audio are ready instead of at once (the
         default); potentially avoids short pauses on slow machines
+    qtts_client.py FILE --voice me.wav --verbose
+        also show the model, the CLI settings, and the chunk numbers; the
+        chunk text is shown even without --verbose
     qtts_client.py --stop-playback
         cancel the running qtts call, so it stops speaking; the server keeps running
     qtts_client.py --stop-server
@@ -320,7 +323,7 @@ class _Player:
         self._stream.close()
 
 
-def _play(events: queue.Queue[_Event], player: _Player) -> None:
+def _play(events: queue.Queue[_Event], player: _Player, verbose: bool) -> None:
     """Hand the frames to the player until playback ends or the server stops it."""
     while True:
         event = events.get()
@@ -330,7 +333,8 @@ def _play(events: queue.Queue[_Event], player: _Player) -> None:
             raise event
         header, audio = event
         if header["type"] == "chunk":
-            print(header["index"])
+            if verbose:
+                print(header["index"])
             print(header["text"])
         elif header["type"] == "audio":
             player.add(audio)
@@ -345,7 +349,7 @@ def _play(events: queue.Queue[_Event], player: _Player) -> None:
 def _format_settings(args: argparse.Namespace) -> str:
     """Return the speech settings of args as long-form CLI flags, defaults included."""
     # The input file and the action flags are no speech settings.
-    not_settings = {"file", "clipboard", "stop_playback", "stop_server"}
+    not_settings = {"file", "clipboard", "verbose", "stop_playback", "stop_server"}
     return "\n".join(
         f"{name.replace('_', '-')}={value}"
         for name, value in vars(args).items()
@@ -358,10 +362,12 @@ def speak(
     pieces: Iterator[str],
     prebuffer_s: float,
     settings: str,
+    verbose: bool,
 ) -> None:
     """Send the request and its text, then play the audio pieces as they arrive.
 
-    The settings line is printed after the model line.
+    With verbose, the model and the settings line are printed before the chunks,
+    and each chunk's index is printed before its text.
 
     A reader thread takes the frames off the socket into a queue, and a sender
     thread sends the text as the input produces it, so the server can start a
@@ -382,8 +388,9 @@ def speak(
         if hello["type"] == "stopped":
             print("qtts: canceled by another qtts call", file=sys.stderr)
             return
-        print(f"model: {hello['model']}")
-        print(f"settings: {settings}")
+        if verbose:
+            print(f"model: {hello['model']}")
+            print(f"settings: {settings}")
         events: queue.Queue[_Event] = queue.Queue()
         reader = threading.Thread(
             target=_read_frames,
@@ -399,7 +406,7 @@ def speak(
         sender.start()
         player = _Player(hello["sample_rate"], prebuffer_s, lambda: events.put(None))
         try:
-            _play(events, player)
+            _play(events, player, verbose)
         finally:
             player.close()
             # Hanging up ends the reader thread's read and tells the server that
@@ -423,8 +430,14 @@ def main() -> None:
         help="speak text from the clipboard",
     )
     parser.add_argument(
-        "--voice",
+        "--verbose",
         "-v",
+        action="store_true",
+        help="show the model, the CLI settings, and the chunk numbers; chunk "
+        "text is always shown",
+    )
+    parser.add_argument(
+        "--voice",
         type=Path,
         metavar="AUDIO_FILE",
         help="reference recording of the voice to clone; required for speaking",
@@ -564,6 +577,7 @@ def main() -> None:
         pieces,
         args.prebuffer,
         _format_settings(args),
+        args.verbose,
     )
 
 
