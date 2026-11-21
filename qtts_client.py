@@ -492,7 +492,9 @@ def speak(
 
 
 def main() -> None:
-    """Send text from a file, clipboard, or stdin pipe to the server and play or save it."""
+    """Send text from a file, clipboard, or stdin pipe to the server and play or
+    save it.
+    """
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -641,7 +643,7 @@ def main() -> None:
             parser.error("--voice-design must describe a voice")
         if args.voice or args.transcript:
             parser.error(
-                "--voice-design cannot be combined with --voice or --transcript"
+                "--voice-design cannot be combined with --voice or --transcript",
             )
         if args.model_size == "0.6B":
             parser.error("--voice-design has no 0.6B model; use --model-size 1.7B")
@@ -668,9 +670,11 @@ def main() -> None:
             ),
             "language": args.language,
             # Absolute, because the server runs in another working directory.
-            "ref_audio": str(args.voice.expanduser().resolve(strict=True))
-            if args.voice
-            else None,
+            "ref_audio": (
+                str(args.voice.expanduser().resolve(strict=True))
+                if args.voice
+                else None
+            ),
             "ref_text": ref_text,
             "instruct": voice_design,
             "sampling": {
