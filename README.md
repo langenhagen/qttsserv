@@ -32,12 +32,12 @@ sudo ln -sf "$PWD/qtts.sh" /usr/local/bin/qtts  # link the CLI so you can use it
 ```bash
 qtts --help
 qtts FILE                                           # speak a text file in random voice
-qtts FILE --voice me.wav                            # speak a text file in the cloned voice of me.wav
 qtts FILE --voice me.wav --transcript me.txt        # speak a text file in a more accurately cloned voice
+qtts FILE --voice me.wav                            # voice-clone the voice from me.wav; use transcript.txt beside it if present
 qtts FILE --voice-design "A deep, calm male voice"  # describe a new voice (1.7B only)
-qtts FILE --voice me.wav -o out.wav                 # write to a WAV file instead of playing
-qtts --clipboard --voice me.wav                     # speak the clipboard
-printf 'One. Two.\n\nThree.' | qtts --voice me.wav  # stream piped text as it arrives
+qtts FILE --voice me.wav --out-file o out.wav       # write to a WAV file instead of playing
+qtts --clipboard --voice me.wav                     # use the contents of the clipboard as input
+printf 'One. Two.\n\nThree.' | qtts                 # stream piped text as it arrives
 qtts FILE --voice me.wav --language german          # set the language instead of auto-detecting it
 qtts FILE --voice me.wav --temperature 0.7          # steadier delivery; default 1.3, higher is livelier
 qtts FILE --voice me.wav --seed 42                  # same delivery on every run; default 0 is random
@@ -58,6 +58,10 @@ holds about 2.4 GB of RAM while idle.
 describe in words instead of cloning a reference. It needs `--model-size 1.7B`;
 there is no 0.6B VoiceDesign model. It cannot be combined with `--voice` or
 `--transcript`.
+
+`--transcript` supplies the exact words spoken in the reference recording. If
+it is omitted, a `transcript.txt` next to the `--voice` file is used when it
+exists; otherwise the voice is cloned without a transcript.
 
 ## How It Works
 

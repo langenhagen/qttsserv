@@ -12,9 +12,11 @@ after a failure.
 
 With --voice, the voice is cloned from that reference recording; the optional
 --transcript holds the exact words spoken in it, so the model copies rhythm and
-accent as well as the timbre. Without --voice, the model speaks in a random
-voice. With --voice-design, the VoiceDesign model instead speaks in the voice
-described in words; it has no 0.6B variant and cannot be combined with --voice.
+accent as well as the timbre. If no --transcript is given, a transcript.txt next
+to the voice recording is used when present. Without --voice, the model speaks
+in a random voice. With --voice-design, the VoiceDesign model instead speaks in
+the voice described in words; it has no 0.6B variant and cannot be combined with
+--voice.
 
 A new qtts call cancels the running one: starting qtts while another one still
 speaks stops the other one, and so does --stop-playback. Each client stays
@@ -381,6 +383,17 @@ def _write(events: queue.Queue[_Event], outfile: sf.SoundFile, verbose: bool) ->
             return
 
 
+def _transcript_path(voice: Path | None, transcript: Path | None) -> Path | None:
+    """Return the given transcript, or a transcript.txt beside the voice file."""
+    if transcript is not None:
+        return transcript
+    if voice is not None:
+        beside_voice = voice.expanduser().parent / "transcript.txt"
+        if beside_voice.is_file():
+            return beside_voice
+    return None
+
+
 def _format_settings(args: argparse.Namespace) -> str:
     """Return the speech settings of args as long-form CLI flags, defaults included."""
     # The input file and the action flags are no speech settings.
@@ -523,7 +536,8 @@ def main() -> None:
         "-t",
         type=Path,
         metavar="TEXT_FILE",
-        help="exact words spoken in the --voice recording; optional",
+        help="exact words spoken in the --voice recording; defaults to a "
+        "transcript.txt beside the voice file when present",
     )
     parser.add_argument(
         "--language",
@@ -639,6 +653,7 @@ def main() -> None:
     else:
         parser.print_usage()
         sys.exit(2)
+    args.transcript = _transcript_path(args.voice, args.transcript)
     ref_text = args.transcript.read_text().strip() if args.transcript else None
 
     speak(
