@@ -422,8 +422,9 @@ def speak(
 ) -> None:
     """Send the request and its text, then play it or write it to a file.
 
-    With verbose, the model and the settings line are printed before the chunks,
-    and each chunk's index is printed before its text.
+    With verbose, the model and the settings are printed before the chunks;
+    settings start on the line after "settings:", and each chunk's index is
+    printed before its text.
 
     A reader thread takes the frames off the socket into a queue, and a sender
     thread sends the text as the input produces it, so the server can start a
@@ -446,7 +447,8 @@ def speak(
             return
         if verbose:
             print(f"model: {hello['model']}")
-            print(f"settings: {settings}")
+            print("settings:")
+            print(settings)
         events: queue.Queue[_Event] = queue.Queue()
         reader = threading.Thread(
             target=_read_frames,
