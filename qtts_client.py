@@ -336,7 +336,7 @@ class _Player:
         self._stream.close()
 
 
-def _play(events: queue.Queue[_Event], player: _Player, verbose: bool) -> None:
+def _play(events: queue.Queue[_Event], player: _Player, *, verbose: bool) -> None:
     """Hand the frames to the player until playback ends or the server stops it."""
     while True:
         event = events.get()
@@ -359,7 +359,12 @@ def _play(events: queue.Queue[_Event], player: _Player, verbose: bool) -> None:
             return
 
 
-def _write(events: queue.Queue[_Event], outfile: sf.SoundFile, verbose: bool) -> None:
+def _write(
+    events: queue.Queue[_Event],
+    outfile: sf.SoundFile,
+    *,
+    verbose: bool,
+) -> None:
     """Write the frames to outfile instead of playing them."""
     import numpy as np  # noqa: PLC0415 - lazy: only --out-file needs it
 
@@ -417,6 +422,7 @@ def speak(
     pieces: Iterator[str],
     prebuffer_s: float,
     settings: str,
+    *,
     verbose: bool,
     out_file: Path | None = None,
 ) -> None:
@@ -473,14 +479,14 @@ def speak(
                     channels=1,
                     samplerate=hello["sample_rate"],
                 ) as outfile:
-                    _write(events, outfile, verbose)
+                    _write(events, outfile, verbose=verbose)
             else:
                 player = _Player(
                     hello["sample_rate"],
                     prebuffer_s,
                     lambda: events.put(None),
                 )
-                _play(events, player, verbose)
+                _play(events, player, verbose=verbose)
         finally:
             if player is not None:
                 player.close()
@@ -690,8 +696,8 @@ def main() -> None:
         pieces,
         args.prebuffer,
         _format_settings(args),
-        args.verbose,
-        args.out_file,
+        verbose=args.verbose,
+        out_file=args.out_file,
     )
 
 
